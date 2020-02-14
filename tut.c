@@ -32,7 +32,7 @@ tut_packets_out (void *packets_out_ctx,
 
 
 static void
-usage (const char *argv0)
+tut_usage (const char *argv0)
 {
     const char *name;
 
@@ -97,7 +97,7 @@ main (int argc, char **argv)
             }
             break;
         case 'h':
-            usage(argv[0]);
+            tut_usage(argv[0]);
             exit(EXIT_SUCCESS);
             break;
         default:
