@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "lsquic.h"
 
@@ -30,11 +31,56 @@ tut_packets_out (void *packets_out_ctx,
 }
 
 
+static void
+usage (const char *argv0)
+{
+    const char *name;
+
+    name = strchr(argv0, '/');
+    if (name)
+        ++name;
+    else
+        name = argv0;
+
+    fprintf(stdout,
+"Usage: %s [options]\n"
+"\n"
+"   -f log.file     Log message to this log file.  If not specified, the\n"
+"                     are printed to stderr.\n"
+"   -h              Print this help screen and exit.\n"
+    , name);
+}
+
+
 int
-main (void)
+main (int argc, char **argv)
 {
     struct lsquic_engine_api eapi;
     struct lsquic_engine *engine;
+    FILE *log_fh = stderr;
+    int opt;
+
+    while (opt = getopt(argc, argv, "f:h"), opt != -1)
+    {
+        switch (opt)
+        {
+        case 'f':
+            log_fh = fopen(optarg, "ab");
+            if (!log_fh)
+            {
+                perror("cannot open log file for writing");
+                exit(EXIT_FAILURE);
+            }
+            break;
+        case 'h':
+            usage(argv[0]);
+            exit(EXIT_SUCCESS);
+            break;
+        default:
+            exit(EXIT_FAILURE);
+            break;
+        }
+    }
 
     if (0 != lsquic_global_init(LSQUIC_GLOBAL_SERVER|LSQUIC_GLOBAL_CLIENT))
     {
@@ -43,7 +89,7 @@ main (void)
     }
 
     /* Initialize logging */
-    lsquic_logger_init(&logger_if, stderr, LLTS_NONE);
+    lsquic_logger_init(&logger_if, log_fh, LLTS_NONE);
 
     /* Initialize callbacks */
     memset(&eapi, 0, sizeof(eapi));
