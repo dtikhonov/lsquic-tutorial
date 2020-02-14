@@ -47,6 +47,10 @@ usage (const char *argv0)
 "\n"
 "   -f log.file     Log message to this log file.  If not specified, the\n"
 "                     are printed to stderr.\n"
+"   -L level        Set library-wide log level.  Defaults to 'warn'.\n"
+"   -l module=level Set log level of specific module.  Several of these\n"
+"                     can be specified via multiple -l flags or by combining\n"
+"                     these with comma, e.g. -l event=debug,conn=info.\n"
 "   -h              Print this help screen and exit.\n"
     , name);
 }
@@ -60,7 +64,13 @@ main (int argc, char **argv)
     FILE *log_fh = stderr;
     int opt;
 
-    while (opt = getopt(argc, argv, "f:h"), opt != -1)
+    if (0 != lsquic_global_init(LSQUIC_GLOBAL_SERVER|LSQUIC_GLOBAL_CLIENT))
+    {
+        fprintf(stderr, "global initialization failed\n");
+        exit(EXIT_FAILURE);
+    }
+
+    while (opt = getopt(argc, argv, "f:l:L:h"), opt != -1)
     {
         switch (opt)
         {
@@ -72,6 +82,20 @@ main (int argc, char **argv)
                 exit(EXIT_FAILURE);
             }
             break;
+        case 'l':
+            if (0 != lsquic_logger_lopt(optarg))
+            {
+                fprintf(stderr, "error processing -l option\n");
+                exit(EXIT_FAILURE);
+            }
+            break;
+        case 'L':
+            if (0 != lsquic_set_log_level(optarg))
+            {
+                fprintf(stderr, "error processing -L option\n");
+                exit(EXIT_FAILURE);
+            }
+            break;
         case 'h':
             usage(argv[0]);
             exit(EXIT_SUCCESS);
@@ -80,12 +104,6 @@ main (int argc, char **argv)
             exit(EXIT_FAILURE);
             break;
         }
-    }
-
-    if (0 != lsquic_global_init(LSQUIC_GLOBAL_SERVER|LSQUIC_GLOBAL_CLIENT))
-    {
-        fprintf(stderr, "global initialization failed\n");
-        exit(EXIT_FAILURE);
     }
 
     /* Initialize logging */
