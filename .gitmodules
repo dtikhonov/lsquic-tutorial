@@ -1,6 +1,3 @@
 [submodule "boringssl"]
 	path = boringssl
 	url = https://boringssl.googlesource.com/boringssl
-[submodule "lsquic"]
-	path = lsquic
-	url = https://github.com/litespeedtech/lsquic
