@@ -56,6 +56,55 @@ tut_usage (const char *argv0)
 }
 
 
+static lsquic_conn_ctx_t *
+tut_client_on_new_conn (void *stream_if_ctx, struct lsquic_conn *conn)
+{
+    return NULL;
+}
+
+
+static void
+tut_client_on_conn_closed (struct lsquic_conn *conn)
+{
+}
+
+
+static lsquic_stream_ctx_t *
+tut_client_on_new_stream (void *stream_if_ctx, struct lsquic_stream *stream)
+{
+    return NULL;
+}
+
+
+static void
+tut_client_on_read (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
+{
+}
+
+
+static void
+tut_client_on_write (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
+{
+}
+
+
+static void
+tut_client_on_close (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
+{
+}
+
+
+static const struct lsquic_stream_if tut_client_callbacks =
+{
+    .on_new_conn        = tut_client_on_new_conn,
+    .on_conn_closed     = tut_client_on_conn_closed,
+    .on_new_stream      = tut_client_on_new_stream,
+    .on_read            = tut_client_on_read,
+    .on_write           = tut_client_on_write,
+    .on_close           = tut_client_on_close,
+};
+
+
 int
 main (int argc, char **argv)
 {
@@ -112,6 +161,7 @@ main (int argc, char **argv)
     /* Initialize callbacks */
     memset(&eapi, 0, sizeof(eapi));
     eapi.ea_packets_out = tut_packets_out;
+    eapi.ea_stream_if   = &tut_client_callbacks;
 
     engine = lsquic_engine_new(LSENG_SERVER, &eapi);
     if (!engine)
