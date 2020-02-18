@@ -8,6 +8,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+#include <openssl/ssl.h>
+
 #include "lsquic.h"
 
 
@@ -20,6 +24,46 @@ tut_log_buf (void *ctx, const char *buf, size_t len)
     return 0;
 }
 static const struct lsquic_logger_if logger_if = { tut_log_buf, };
+
+
+static SSL_CTX *s_ssl_ctx;
+
+static int
+tut_load_cert (const char *cert_file, const char *key_file)
+{
+    int rv = -1;
+
+    s_ssl_ctx = SSL_CTX_new(TLS_method());
+    if (!s_ssl_ctx)
+    {
+        fprintf(stderr, "SSL_CTX_new failed\n");
+        goto end;
+    }
+    SSL_CTX_set_min_proto_version(s_ssl_ctx, TLS1_3_VERSION);
+    SSL_CTX_set_max_proto_version(s_ssl_ctx, TLS1_3_VERSION);
+    SSL_CTX_set_default_verify_paths(s_ssl_ctx);
+    if (1 != SSL_CTX_use_certificate_chain_file(s_ssl_ctx, cert_file))
+    {
+        fprintf(stderr, "SSL_CTX_use_certificate_chain_file failed\n");
+        goto end;
+    }
+    if (1 != SSL_CTX_use_PrivateKey_file(s_ssl_ctx, key_file,
+                                                            SSL_FILETYPE_PEM))
+    {
+        fprintf(stderr, "SSL_CTX_use_PrivateKey_file failed\n");
+        goto end;
+    }
+    rv = 0;
+
+  end:
+    if (rv != 0)
+    {
+        if (s_ssl_ctx)
+            SSL_CTX_free(s_ssl_ctx);
+        s_ssl_ctx = NULL;
+    }
+    return rv;
+}
 
 
 static int
@@ -45,6 +89,8 @@ tut_usage (const char *argv0)
     fprintf(stdout,
 "Usage: %s [options]\n"
 "\n"
+"   -c cert.file    Certificate.\n"
+"   -k key.file     Key file.\n"
 "   -f log.file     Log message to this log file.  If not specified, the\n"
 "                     are printed to stderr.\n"
 "   -L level        Set library-wide log level.  Defaults to 'warn'.\n"
@@ -110,8 +156,9 @@ main (int argc, char **argv)
 {
     struct lsquic_engine_api eapi;
     struct lsquic_engine *engine;
+    const char *cert_file = NULL, *key_file = NULL;
     FILE *log_fh = stderr;
-    int opt;
+    int opt, is_server;
 
     if (0 != lsquic_global_init(LSQUIC_GLOBAL_SERVER|LSQUIC_GLOBAL_CLIENT))
     {
@@ -119,10 +166,13 @@ main (int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    while (opt = getopt(argc, argv, "f:l:L:h"), opt != -1)
+    while (opt = getopt(argc, argv, "c:f:k:l:L:h"), opt != -1)
     {
         switch (opt)
         {
+        case 'c':
+            cert_file = optarg;
+            break;
         case 'f':
             log_fh = fopen(optarg, "ab");
             if (!log_fh)
@@ -130,6 +180,9 @@ main (int argc, char **argv)
                 perror("cannot open log file for writing");
                 exit(EXIT_FAILURE);
             }
+            break;
+        case 'k':
+            key_file = optarg;
             break;
         case 'l':
             if (0 != lsquic_logger_lopt(optarg))
@@ -155,6 +208,23 @@ main (int argc, char **argv)
         }
     }
 
+    if (cert_file || key_file)
+    {
+        if (!(cert_file && key_file))
+        {
+            fprintf(stderr, "Specify both cert (-c) and key (-k) files\n");
+            exit(EXIT_FAILURE);
+        }
+        if (0 != tut_load_cert(cert_file, key_file))
+        {
+            fprintf(stderr, "Cannot load certificate\n");
+            exit(EXIT_FAILURE);
+        }
+        is_server = 1;
+    }
+    else
+        is_server = 0;
+
     /* Initialize logging */
     lsquic_logger_init(&logger_if, log_fh, LLTS_NONE);
 
@@ -163,7 +233,7 @@ main (int argc, char **argv)
     eapi.ea_packets_out = tut_packets_out;
     eapi.ea_stream_if   = &tut_client_callbacks;
 
-    engine = lsquic_engine_new(LSENG_SERVER, &eapi);
+    engine = lsquic_engine_new(is_server ? LSENG_SERVER : 0, &eapi);
     if (!engine)
     {
         fprintf(stderr, "cannot create engine\n");
