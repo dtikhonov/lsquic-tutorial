@@ -234,7 +234,10 @@ tut_client_on_hsk_done (lsquic_conn_t *conn, enum lsquic_hsk_status status)
 static void
 tut_client_on_conn_closed (struct lsquic_conn *conn)
 {
-    LOG("connection closed");
+    struct tut *const tut = (void *) lsquic_conn_get_ctx(conn);
+
+    LOG("client connection closed -- stop reading from socket");
+    ev_io_stop(tut->tut_loop, &tut->tut_sock_w);
 }
 
 
@@ -506,8 +509,9 @@ tut_read_stdin (EV_P_ ev_io *w, int revents)
     }
     else if (nr == 0)
     {
-        LOG("read EOF, exit loop");
-        ev_break(tut->tut_loop, EVBREAK_ONE);
+        LOG("read EOF: stop reading from stdin, close connection");
+        ev_io_stop(tut->tut_loop, w);
+        lsquic_conn_close(tut->tut_u.c.conn);
     }
     else
     {
