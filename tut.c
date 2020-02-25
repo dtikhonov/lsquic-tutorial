@@ -546,11 +546,19 @@ tut_process_conns (struct tut *tut)
 
     if (lsquic_engine_earliest_adv_tick(tut->tut_engine, &diff))
     {
-        if (diff < 0 || (unsigned) diff < LSQUIC_DF_CLOCK_GRANULARITY)
-            timeout = (ev_tstamp) LSQUIC_DF_CLOCK_GRANULARITY / 1000000;
+        if (diff >= LSQUIC_DF_CLOCK_GRANULARITY)
+            /* Expected case: convert to seconds */
+            timeout = (ev_tstamp) diff / 1000000;
+        else if (diff <= 0)
+            /* It should not happen often that the next tick is in the past
+             * as we just processed connections.  Avoid a busy loop by
+             * scheduling an event:
+             */
+            timeout = 0.0;
         else
-            timeout = ((ev_tstamp) diff / 1000000)
-                            + ((ev_tstamp) (diff % 1000000) / 1000000);
+            /* Round up to granularity */
+            timeout = (ev_tstamp) LSQUIC_DF_CLOCK_GRANULARITY / 1000000;
+        LOG("converted diff %d usec to %.4lf seconds", diff, timeout);
         ev_timer_init(&tut->tut_timer, tut_timer_expired, timeout, 0.);
         ev_timer_start(tut->tut_loop, &tut->tut_timer);
     }
