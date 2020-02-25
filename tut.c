@@ -40,14 +40,18 @@ tut_log_buf (void *ctx, const char *buf, size_t len)
 static const struct lsquic_logger_if logger_if = { tut_log_buf, };
 
 
+static int s_verbose;
 static void
 LOG (const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    (void) vfprintf(s_log_fh, fmt, ap);
-    va_end(ap);
-    fprintf(s_log_fh, "\n");
+    if (s_verbose)
+    {
+        va_list ap;
+        va_start(ap, fmt);
+        (void) vfprintf(s_log_fh, fmt, ap);
+        va_end(ap);
+        fprintf(s_log_fh, "\n");
+    }
 }
 
 
@@ -167,6 +171,7 @@ tut_usage (const char *argv0)
 "   -l module=level Set log level of specific module.  Several of these\n"
 "                     can be specified via multiple -l flags or by combining\n"
 "                     these with comma, e.g. -l event=debug,conn=info.\n"
+"   -v              Verbose: log program messages as well.\n"
 "   -h              Print this help screen and exit.\n"
     , name);
 }
@@ -624,7 +629,7 @@ main (int argc, char **argv)
 
     memset(&tut, 0, sizeof(tut));
 
-    while (opt = getopt(argc, argv, "c:f:k:l:L:h"), opt != -1)
+    while (opt = getopt(argc, argv, "c:f:k:l:L:hv"), opt != -1)
     {
         switch (opt)
         {
@@ -655,6 +660,9 @@ main (int argc, char **argv)
                 fprintf(stderr, "error processing -L option\n");
                 exit(EXIT_FAILURE);
             }
+            break;
+        case 'v':
+            ++s_verbose;
             break;
         case 'h':
             tut_usage(argv[0]);
