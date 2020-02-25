@@ -15,8 +15,8 @@ $ctags_bin -f $tmpfile -R -I SLIST_ENTRY+=void -I LIST_ENTRY+=void \
     -I STAILQ_ENTRY+=void -I TAILQ_ENTRY+=void -I CIRCLEQ_ENTRY+=void \
     -I TAILQ_ENTRY+=void -I SLIST_HEAD+=void -I LIST_HEAD+=void \
     -I STAILQ_HEAD+=void -I TAILQ_HEAD+=void -I CIRCLEQ_HEAD+=void \
-    -I TAILQ_HEAD+=void \
-    *.[ch] lsquic/include lsquic/src/liblsquic lsquic/src/lshpack \
+    -I TAILQ_HEAD+=void -I EV_CPP+= -I ecb_noinline= \
+    *.[ch] libev lsquic/include lsquic/src/liblsquic lsquic/src/lshpack \
 && \
 : some special sauce for conn_iface: && \
 egrep '^(mini|full|ietf_full|id24_full|evanescent)_conn_ci_' $tmpfile | sed -r 's/(mini|full|ietf_full|id24_full|evanescent)_conn_//' > $addl && \
