@@ -23,6 +23,9 @@
 
 #include "lsquic.h"
 
+struct tut;
+static void tut_process_conns (struct tut *);
+
 
 static FILE *s_log_fh;
 
@@ -44,6 +47,7 @@ LOG (const char *fmt, ...)
     va_start(ap, fmt);
     (void) vfprintf(s_log_fh, fmt, ap);
     va_end(ap);
+    fprintf(s_log_fh, "\n");
 }
 
 
@@ -57,7 +61,7 @@ tut_load_cert (const char *cert_file, const char *key_file)
     s_ssl_ctx = SSL_CTX_new(TLS_method());
     if (!s_ssl_ctx)
     {
-        fprintf(stderr, "SSL_CTX_new failed\n");
+        LOG("SSL_CTX_new failed");
         goto end;
     }
     SSL_CTX_set_min_proto_version(s_ssl_ctx, TLS1_3_VERSION);
@@ -65,13 +69,13 @@ tut_load_cert (const char *cert_file, const char *key_file)
     SSL_CTX_set_default_verify_paths(s_ssl_ctx);
     if (1 != SSL_CTX_use_certificate_chain_file(s_ssl_ctx, cert_file))
     {
-        fprintf(stderr, "SSL_CTX_use_certificate_chain_file failed\n");
+        LOG("SSL_CTX_use_certificate_chain_file failed");
         goto end;
     }
     if (1 != SSL_CTX_use_PrivateKey_file(s_ssl_ctx, key_file,
                                                             SSL_FILETYPE_PEM))
     {
-        fprintf(stderr, "SSL_CTX_use_PrivateKey_file failed\n");
+        LOG("SSL_CTX_use_PrivateKey_file failed");
         goto end;
     }
     rv = 0;
@@ -84,6 +88,13 @@ tut_load_cert (const char *cert_file, const char *key_file)
         s_ssl_ctx = NULL;
     }
     return rv;
+}
+
+
+static SSL_CTX *
+tut_get_ssl_ctx (void *peer_ctx)
+{
+    return s_ssl_ctx;
 }
 
 
@@ -114,7 +125,7 @@ tut_packets_out (void *packets_out_ctx, const struct lsquic_out_spec *specs,
         s = sendmsg(fd, &msg, 0);
         if (s < 0)
         {
-            fprintf(stderr, "sendmsg failed: %s\n", strerror(errno));
+            LOG("sendmsg failed: %s", strerror(errno));
             break;
         }
         ++n;
@@ -122,7 +133,7 @@ tut_packets_out (void *packets_out_ctx, const struct lsquic_out_spec *specs,
     while (n < count);
 
     if (n < count)
-        fprintf(stderr, "could not send all of them\n");    /* TODO */
+        LOG("could not send all of them");    /* TODO */
 
     if (n > 0)
         return n;
@@ -238,6 +249,148 @@ static const struct lsquic_stream_if tut_client_callbacks =
 };
 
 
+static lsquic_conn_ctx_t *
+tut_server_on_new_conn (void *stream_if_ctx, struct lsquic_conn *conn)
+{
+    struct tut *const tut = stream_if_ctx;
+
+    LOG("created new connection");
+    return (void *) tut;     /* Pointer to tut is the connection context */
+}
+
+
+static void
+tut_server_on_conn_closed (lsquic_conn_t *conn)
+{
+    LOG("closed connection");
+}
+
+
+struct tut_server_stream_ctx
+{
+    size_t           tssc_sz;            /* Number of bytes in tsc_buf */
+    unsigned char    tssc_buf[0x100];    /* Bytes read in from client */
+};
+
+
+static lsquic_stream_ctx_t *
+tut_server_on_new_stream (void *stream_if_ctx, struct lsquic_stream *stream)
+{
+    struct tut_server_stream_ctx *tssc;
+
+    /* Allocate a new buffer per stream.  There is no reason why the echo
+     * server could not process several echo streams at the same time.
+     */
+    tssc = malloc(sizeof(*tssc));
+    if (!tssc)
+    {
+        LOG("cannot allocate server stream context");
+        lsquic_conn_abort(lsquic_stream_conn(stream));
+        return NULL;
+    }
+
+    tssc->tssc_sz = 0;
+    lsquic_stream_wantread(stream, 1);
+    LOG("created new echo stream -- want to read");
+    return (void *) tssc;
+}
+
+
+/* Read until newline and then echo it back */
+static void
+tut_server_on_read (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
+{
+    struct tut_server_stream_ctx *const tssc = (void *) h;
+    ssize_t nread;
+    unsigned char buf[1];
+
+    nread = lsquic_stream_read(stream, buf, sizeof(buf));
+    if (nread > 0)
+    {
+        tssc->tssc_buf[ tssc->tssc_sz ] = buf[0];
+        ++tssc->tssc_sz;
+        if (buf[0] == (unsigned char) '\n'
+                            || tssc->tssc_sz == sizeof(tssc->tssc_buf))
+        {
+            LOG("read newline or filled buffer, switch to writing");
+            lsquic_stream_wantread(stream, 0);
+            lsquic_stream_wantwrite(stream, 1);
+        }
+    }
+    else if (nread == 0)
+    {
+        LOG("read EOF");
+        lsquic_stream_shutdown(stream, 0);
+        if (tssc->tssc_sz)
+            lsquic_stream_wantwrite(stream, 1);
+    }
+    else
+    {
+        /* This should not happen */
+        LOG("error reading from stream (errno: %d) -- abort connection", errno);
+        lsquic_conn_abort(lsquic_stream_conn(stream));
+    }
+}
+
+
+static void
+tut_server_on_write (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
+{
+    struct tut_server_stream_ctx *const tssc = (void *) h;
+    ssize_t nw;
+
+    assert(tssc->tssc_sz > 0);
+    nw = lsquic_stream_write(stream, tssc->tssc_buf, tssc->tssc_sz);
+    if (nw > 0)
+    {
+        tssc->tssc_sz -= (size_t) nw;
+        if (tssc->tssc_sz == 0)
+        {
+            LOG("wrote all %zd bytes to stream, switch to reading",
+                                                            (size_t) nw);
+            (void) lsquic_stream_flush(stream);
+            lsquic_stream_wantwrite(stream, 0);
+            lsquic_stream_wantread(stream, 1);
+        }
+        else
+        {
+            memmove(tssc->tssc_buf, tssc->tssc_buf + nw, tssc->tssc_sz);
+            LOG("wrote %zd bytes to stream, still have %zd bytes to write",
+                                                (size_t) nw, tssc->tssc_sz);
+        }
+    }
+    else
+    {
+        /* When `on_write()' is called, the library guarantees that at least
+         * something can be written.  If not, that's an error whether 0 or -1
+         * is returned.
+         */
+        LOG("stream_write() returned %ld, abort connection", (long) nw);
+        lsquic_conn_abort(lsquic_stream_conn(stream));
+    }
+}
+
+
+static void
+tut_server_on_close (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
+{
+    struct tut_server_stream_ctx *const tssc = (void *) h;
+    free(tssc);
+    LOG("stream closed");
+}
+
+
+static const struct lsquic_stream_if tut_server_callbacks =
+{
+    .on_new_conn        = tut_server_on_new_conn,
+    .on_conn_closed     = tut_server_on_conn_closed,
+    .on_new_stream      = tut_server_on_new_stream,
+    .on_read            = tut_server_on_read,
+    .on_write           = tut_server_on_write,
+    .on_close           = tut_server_on_close,
+};
+
+
 static void
 tut_read_stdin (EV_P_ ev_io *w, int revents)
 {
@@ -253,7 +406,7 @@ tut_read_stdin (EV_P_ ev_io *w, int revents)
     else
     {
         if (nr < 0)
-            fprintf(stderr, "error reading from stdin: %s\n", strerror(errno));
+            LOG("error reading from stdin: %s", strerror(errno));
         ev_break(tut->tut_loop, EVBREAK_ONE);
     }
 }
@@ -276,11 +429,19 @@ tut_set_nonblocking (int fd)
 
 
 static void
+tut_timer_expired (EV_P_ ev_timer *timer, int revents)
+{
+    tut_process_conns(timer->data);
+}
+
+
+static void
 tut_process_conns (struct tut *tut)
 {
     int diff;
     ev_tstamp timeout;
 
+    ev_timer_stop(tut->tut_loop, &tut->tut_timer);
     lsquic_engine_process_conns(tut->tut_engine);
 
     if (lsquic_engine_earliest_adv_tick(tut->tut_engine, &diff))
@@ -290,7 +451,7 @@ tut_process_conns (struct tut *tut)
         else
             timeout = ((ev_tstamp) diff / 1000000)
                             + ((ev_tstamp) (diff % 1000000) / 1000000);
-        ev_timer_set(&tut->tut_timer, timeout, 0.);
+        ev_timer_init(&tut->tut_timer, tut_timer_expired, timeout, 0.);
         ev_timer_start(tut->tut_loop, &tut->tut_timer);
     }
 }
@@ -316,7 +477,7 @@ tut_read_socket (EV_P_ ev_io *w, int revents)
     nread = recvmsg(w->fd, &msg, 0);
     if (-1 == nread) {
         if (!(EAGAIN == errno || EWOULDBLOCK == errno))
-            fprintf(stderr, "recvmsg: %s\n", strerror(errno));
+            LOG("recvmsg: %s", strerror(errno));
         return;
     }
 
@@ -328,13 +489,6 @@ tut_read_socket (EV_P_ ev_io *w, int revents)
         0 /* TODO: read ECN from ancillary data */);
 
     tut_process_conns(tut);
-}
-
-
-static void
-tut_timer_expired (EV_P_ ev_timer *timer, int revents)
-{
-    tut_process_conns(timer->data);
 }
 
 
@@ -350,7 +504,7 @@ main (int argc, char **argv)
         struct sockaddr     sa;
         struct sockaddr_in  addr4;
         struct sockaddr_in6 addr6;
-    } peer;
+    } addr;
 
     s_log_fh = stderr;
 
@@ -406,38 +560,39 @@ main (int argc, char **argv)
 
     if (optind + 1 >= argc)
     {
-        fprintf(stderr, "please specify IP address and port number\n");
+        LOG("please specify IP address and port number");
         exit(EXIT_FAILURE);
     }
 
     /* Parse IP address and port number */
-    if (inet_pton(AF_INET, argv[optind], &peer.addr4.sin_addr))
+    if (inet_pton(AF_INET, argv[optind], &addr.addr4.sin_addr))
     {
-        peer.addr4.sin_family = AF_INET;
-        peer.addr4.sin_port   = htons(atoi(argv[optind + 1]));
+        addr.addr4.sin_family = AF_INET;
+        addr.addr4.sin_port   = htons(atoi(argv[optind + 1]));
     }
-    else if (memset(&peer.addr6, 0, sizeof(peer.addr6)),
-       inet_pton(AF_INET6, argv[optind], &peer.addr6.sin6_addr))
+    else if (memset(&addr.addr6, 0, sizeof(addr.addr6)),
+       inet_pton(AF_INET6, argv[optind], &addr.addr6.sin6_addr))
     {
-        peer.addr6.sin6_family = AF_INET;
-        peer.addr6.sin6_port   = htons(atoi(argv[optind + 1]));
+        addr.addr6.sin6_family = AF_INET;
+        addr.addr6.sin6_port   = htons(atoi(argv[optind + 1]));
     }
     else
     {
-        fprintf(stderr, "`%s' is not a valid IP address\n", argv[optind]);
+        LOG("`%s' is not a valid IP address", argv[optind]);
         exit(EXIT_FAILURE);
     }
 
+    /* Specifying certificate and key files indicates server mode */
     if (cert_file || key_file)
     {
         if (!(cert_file && key_file))
         {
-            fprintf(stderr, "Specify both cert (-c) and key (-k) files\n");
+            LOG("Specify both cert (-c) and key (-k) files");
             exit(EXIT_FAILURE);
         }
         if (0 != tut_load_cert(cert_file, key_file))
         {
-            fprintf(stderr, "Cannot load certificate\n");
+            LOG("Cannot load certificate");
             exit(EXIT_FAILURE);
         }
         tut.tut_flags |= TUT_SERVER;
@@ -445,20 +600,33 @@ main (int argc, char **argv)
 
     /* Initialize event loop */
     tut.tut_loop = EV_DEFAULT;
+    tut.tut_sock_fd = socket(addr.sa.sa_family, SOCK_DGRAM, 0);
 
     /* Set up socket */
+    if (tut.tut_sock_fd < 0)
+    {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+    if (0 != tut_set_nonblocking(tut.tut_sock_fd))
+    {
+        perror("fcntl");
+        exit(EXIT_FAILURE);
+    }
+
     if (tut.tut_flags & TUT_SERVER)
     {
+        socklen = sizeof(addr);
+        if (0 != bind(tut.tut_sock_fd, &addr.sa, socklen))
+        {
+            perror("bind");
+            exit(EXIT_FAILURE);
+        }
+        memcpy(&tut.tut_local_sas, &addr, sizeof(addr));
     }
     else
     {
-        tut.tut_sock_fd = socket(peer.sa.sa_family, SOCK_DGRAM, 0);
-        if (tut.tut_sock_fd < 0)
-        {
-            perror("socket");
-            exit(EXIT_FAILURE);
-        }
-        tut.tut_local_sas.ss_family = peer.sa.sa_family;
+        tut.tut_local_sas.ss_family = addr.sa.sa_family;
         socklen = sizeof(tut.tut_local_sas);
         if (0 != bind(tut.tut_sock_fd,
                         (struct sockaddr *) &tut.tut_local_sas, socklen))
@@ -466,15 +634,10 @@ main (int argc, char **argv)
             perror("bind");
             exit(EXIT_FAILURE);
         }
-        if (0 != tut_set_nonblocking(tut.tut_sock_fd))
-        {
-            perror("fcntl");
-            exit(EXIT_FAILURE);
-        }
-        ev_io_init(&tut.tut_sock_w, tut_read_socket, tut.tut_sock_fd, EV_READ);
-        ev_io_start(tut.tut_loop, &tut.tut_sock_w);
         ev_init(&tut.tut_timer, tut_timer_expired);
     }
+    ev_io_init(&tut.tut_sock_w, tut_read_socket, tut.tut_sock_fd, EV_READ);
+    ev_io_start(tut.tut_loop, &tut.tut_sock_w);
 
     /* Initialize logging */
     lsquic_logger_init(&logger_if, s_log_fh, LLTS_HHMMSSUS);
@@ -483,14 +646,16 @@ main (int argc, char **argv)
     memset(&eapi, 0, sizeof(eapi));
     eapi.ea_packets_out = tut_packets_out;
     eapi.ea_packets_out_ctx = &tut;
-    eapi.ea_stream_if   = &tut_client_callbacks;
+    eapi.ea_stream_if   = tut.tut_flags & TUT_SERVER
+                            ? &tut_server_callbacks : &tut_client_callbacks;
     eapi.ea_stream_if_ctx = &tut;
+    eapi.ea_get_ssl_ctx   = tut_get_ssl_ctx;
 
     tut.tut_engine = lsquic_engine_new(tut.tut_flags & TUT_SERVER
                                             ? LSENG_SERVER : 0, &eapi);
     if (!tut.tut_engine)
     {
-        fprintf(stderr, "cannot create engine\n");
+        LOG("cannot create engine");
         exit(EXIT_FAILURE);
     }
 
@@ -510,12 +675,12 @@ main (int argc, char **argv)
                                                                 EV_READ);
         tut.tut_u.c.conn = lsquic_engine_connect(
             tut.tut_engine, N_LSQVER,
-            (struct sockaddr *) &tut.tut_local_sas, &peer.sa,
+            (struct sockaddr *) &tut.tut_local_sas, &addr.sa,
             (void *) (uintptr_t) tut.tut_sock_fd,  /* Peer ctx */
             NULL, NULL, 0, NULL, 0, NULL, 0);
         if (!tut.tut_u.c.conn)
         {
-            fprintf(stderr, "cannot create connection\n");
+            LOG("cannot create connection");
             exit(EXIT_FAILURE);
         }
         tut_process_conns(&tut);
