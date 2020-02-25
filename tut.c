@@ -202,45 +202,133 @@ tut_client_on_new_conn (void *stream_if_ctx, struct lsquic_conn *conn)
 {
     struct tut *const tut = stream_if_ctx;
     tut->tut_u.c.conn = conn;
-    // ev_io_start(EV_DEFAULT, &tec->tec_stdin_w);
-    return NULL;
+    LOG("created connection");
+    return (void *) tut;
+}
+
+
+static void
+tut_client_on_hsk_done (lsquic_conn_t *conn, enum lsquic_hsk_status status)
+{
+    struct tut *const tut = (void *) lsquic_conn_get_ctx(conn);
+
+    switch (status)
+    {
+    case LSQ_HSK_OK:
+    case LSQ_HSK_0RTT_OK:
+        LOG("handshake successful, start stdin watcher");
+        ev_io_start(tut->tut_loop, &tut->tut_u.c.stdin_w);
+        break;
+    default:
+        LOG("handshake failed");
+        break;
+    }
 }
 
 
 static void
 tut_client_on_conn_closed (struct lsquic_conn *conn)
 {
+    LOG("connection closed");
 }
 
 
 static lsquic_stream_ctx_t *
 tut_client_on_new_stream (void *stream_if_ctx, struct lsquic_stream *stream)
 {
+    LOG("created new stream, we want to write");
+    lsquic_stream_wantwrite(stream, 1);
+    /* OK to return NULL: we don't have any stream-specific context */
     return NULL;
 }
 
 
+/* Echo whatever comes back from server, no verification */
 static void
 tut_client_on_read (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 {
+    lsquic_conn_t *conn;
+    struct tut *tut;
+    ssize_t nread;
+    unsigned char buf[3];
+
+    conn = lsquic_stream_conn(stream);
+    tut = (void *) lsquic_conn_get_ctx(conn);
+
+    nread = lsquic_stream_read(stream, buf, sizeof(buf));
+    if (nread > 0)
+    {
+        fwrite(buf, 1, nread, stdout);
+        fflush(stdout);
+    }
+    else if (nread == 0)
+    {
+        LOG("read to end-of-stream: close and read from stdin again");
+        lsquic_stream_shutdown(stream, 0);
+        ev_io_start(tut->tut_loop, &tut->tut_u.c.stdin_w);
+    }
+    else
+    {
+        LOG("error reading from stream (%s) -- exit loop");
+        ev_break(tut->tut_loop, EVBREAK_ONE);
+    }
 }
 
 
+/* Write out the whole line to stream, shutdown write end, and switch
+ * to reading the response.
+ */
 static void
 tut_client_on_write (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 {
+    lsquic_conn_t *conn;
+    struct tut *tut;
+    ssize_t nw;
+
+    conn = lsquic_stream_conn(stream);
+    tut = (void *) lsquic_conn_get_ctx(conn);
+
+    nw = lsquic_stream_write(stream, tut->tut_u.c.buf, tut->tut_u.c.sz);
+    if (nw > 0)
+    {
+        tut->tut_u.c.sz -= (size_t) nw;
+        if (tut->tut_u.c.sz == 0)
+        {
+            LOG("wrote all %zd bytes to stream, switch to reading",
+                                                            (size_t) nw);
+            lsquic_stream_shutdown(stream, 1);  /* This flushes as well */
+            lsquic_stream_wantread(stream, 1);
+        }
+        else
+        {
+            memmove(tut->tut_u.c.buf, tut->tut_u.c.buf + nw, tut->tut_u.c.sz);
+            LOG("wrote %zd bytes to stream, still have %zd bytes to write",
+                                                (size_t) nw, tut->tut_u.c.sz);
+        }
+    }
+    else
+    {
+        /* When `on_write()' is called, the library guarantees that at least
+         * something can be written.  If not, that's an error whether 0 or -1
+         * is returned.
+         */
+        LOG("stream_write() returned %ld, abort connection", (long) nw);
+        lsquic_conn_abort(lsquic_stream_conn(stream));
+    }
 }
 
 
 static void
 tut_client_on_close (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 {
+    LOG("stream closed");
 }
 
 
 static const struct lsquic_stream_if tut_client_callbacks =
 {
     .on_new_conn        = tut_client_on_new_conn,
+    .on_hsk_done        = tut_client_on_hsk_done,
     .on_conn_closed     = tut_client_on_conn_closed,
     .on_new_stream      = tut_client_on_new_stream,
     .on_read            = tut_client_on_read,
@@ -346,11 +434,9 @@ tut_server_on_write (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
         tssc->tssc_sz -= (size_t) nw;
         if (tssc->tssc_sz == 0)
         {
-            LOG("wrote all %zd bytes to stream, switch to reading",
+            LOG("wrote all %zd bytes to stream, close stream",
                                                             (size_t) nw);
-            (void) lsquic_stream_flush(stream);
-            lsquic_stream_wantwrite(stream, 0);
-            lsquic_stream_wantread(stream, 1);
+            lsquic_stream_close(stream);
         }
         else
         {
@@ -391,22 +477,36 @@ static const struct lsquic_stream_if tut_server_callbacks =
 };
 
 
+/* Read one byte at a time -- when user hits enter, send line to server */
 static void
 tut_read_stdin (EV_P_ ev_io *w, int revents)
 {
     struct tut *const tut = w->data;
     ssize_t nr;
 
-    nr = read(w->fd, tut->tut_u.c.buf, sizeof(tut->tut_u.c.buf));
+    assert(tut->tut_u.c.sz < sizeof(tut->tut_u.c.buf));
+
+    nr = read(w->fd, tut->tut_u.c.buf + tut->tut_u.c.sz, 1);
     if (nr > 0)
     {
-        tut->tut_u.c.sz = (size_t) nr;
-        ev_io_stop(EV_A_ w);
+        tut->tut_u.c.sz += nr;
+        if (tut->tut_u.c.buf[tut->tut_u.c.sz - 1] == '\n'
+                            || sizeof(tut->tut_u.c.buf) == tut->tut_u.c.sz)
+        {
+            LOG("read up to newline (or filled buffer): make new stream");
+            lsquic_conn_make_stream(tut->tut_u.c.conn);
+            ev_io_stop(tut->tut_loop, w);
+            tut_process_conns(tut);
+        }
+    }
+    else if (nr == 0)
+    {
+        LOG("read EOF, exit loop");
+        ev_break(tut->tut_loop, EVBREAK_ONE);
     }
     else
     {
-        if (nr < 0)
-            LOG("error reading from stdin: %s", strerror(errno));
+        LOG("error reading from stdin: %s", strerror(errno));
         ev_break(tut->tut_loop, EVBREAK_ONE);
     }
 }
@@ -661,10 +761,7 @@ main (int argc, char **argv)
 
     tut.tut_timer.data = &tut;
     tut.tut_sock_w.data = &tut;
-    if (tut.tut_flags & TUT_SERVER)
-    {
-    }
-    else
+    if (!(tut.tut_flags & TUT_SERVER))
     {
         if (0 != tut_set_nonblocking(STDIN_FILENO))
         {
@@ -673,6 +770,7 @@ main (int argc, char **argv)
         }
         ev_io_init(&tut.tut_u.c.stdin_w, tut_read_stdin, STDIN_FILENO,
                                                                 EV_READ);
+        tut.tut_u.c.stdin_w.data = &tut;
         tut.tut_u.c.conn = lsquic_engine_connect(
             tut.tut_engine, N_LSQVER,
             (struct sockaddr *) &tut.tut_local_sas, &addr.sa,
