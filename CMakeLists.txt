@@ -1,6 +1,7 @@
 CMAKE_MINIMUM_REQUIRED(VERSION 3.5)
 PROJECT(lsquic-tutorial C)
 
+SET(DEFAULT_BUILD_TYPE Debug)
 SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} $ENV{EXTRA_CFLAGS}")
 
 MESSAGE(STATUS "Compiler flags: ${CMAKE_C_FLAGS}")
@@ -12,6 +13,7 @@ INCLUDE_DIRECTORIES(lsquic/include)
 INCLUDE_DIRECTORIES(lsquic/src/liblsquic)       # For lsquic_xxhash.h
 ADD_SUBDIRECTORY(lsquic/src/liblsquic)
 
+INCLUDE_DIRECTORIES(libev)
 ADD_EXECUTABLE(tut tut.c)
 SET(LIBS lsquic crypto ssl z m)
 IF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
