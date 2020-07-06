@@ -760,6 +760,7 @@ main (int argc, char **argv)
     ev_io_start(tut.tut_loop, &tut.tut_sock_w);
 
     /* Initialize logging */
+    setvbuf(s_log_fh, NULL, _IOLBF, 0);
     lsquic_logger_init(&logger_if, s_log_fh, LLTS_HHMMSSUS);
 
     /* Initialize callbacks */
