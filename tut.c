@@ -47,6 +47,7 @@ LOG (const char *fmt, ...)
     if (s_verbose)
     {
         va_list ap;
+        fprintf(s_log_fh, "LOG: ");
         va_start(ap, fmt);
         (void) vfprintf(s_log_fh, fmt, ap);
         va_end(ap);
