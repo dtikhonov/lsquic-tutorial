@@ -512,7 +512,9 @@ tut_read_stdin (EV_P_ ev_io *w, int revents)
     {
         LOG("read EOF: stop reading from stdin, close connection");
         ev_io_stop(tut->tut_loop, w);
+        ev_io_stop(tut->tut_loop, &tut->tut_u.c.stdin_w);
         lsquic_conn_close(tut->tut_u.c.conn);
+        tut_process_conns(tut);
     }
     else
     {
