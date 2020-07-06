@@ -220,7 +220,7 @@ tut_client_on_hsk_done (lsquic_conn_t *conn, enum lsquic_hsk_status status)
     switch (status)
     {
     case LSQ_HSK_OK:
-    case LSQ_HSK_0RTT_OK:
+    case LSQ_HSK_RESUMED_OK:
         LOG("handshake successful, start stdin watcher");
         ev_io_start(tut->tut_loop, &tut->tut_u.c.stdin_w);
         break;
