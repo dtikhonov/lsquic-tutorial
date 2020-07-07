@@ -173,6 +173,7 @@ tut_usage (const char *argv0)
 "                     can be specified via multiple -l flags or by combining\n"
 "                     these with comma, e.g. -l event=debug,conn=info.\n"
 "   -v              Verbose: log program messages as well.\n"
+"   -b VERSION      Use callbacks version VERSION.\n"
 "   -h              Print this help screen and exit.\n"
     , name);
 }
@@ -254,7 +255,7 @@ tut_client_on_new_stream (void *stream_if_ctx, struct lsquic_stream *stream)
 
 /* Echo whatever comes back from server, no verification */
 static void
-tut_client_on_read (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
+tut_client_on_read_v0 (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 {
     lsquic_conn_t *conn;
     struct tut *tut;
@@ -277,6 +278,90 @@ tut_client_on_read (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
         ev_io_start(tut->tut_loop, &tut->tut_u.c.stdin_w);
     }
     else
+    {
+        LOG("error reading from stream (%s) -- exit loop");
+        ev_break(tut->tut_loop, EVBREAK_ONE);
+    }
+}
+
+
+static size_t
+tut_client_readf_v1 (void *ctx, const unsigned char *data, size_t len, int fin)
+{
+    if (len)
+    {
+        fwrite(data, 1, len, stdout);
+        fflush(stdout);
+    }
+    return len;
+}
+
+
+/* Same functionality as tut_client_on_read_v0(), but use a readf callback */
+static void
+tut_client_on_read_v1 (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
+{
+    lsquic_conn_t *conn;
+    struct tut *tut;
+    ssize_t nread;
+
+    conn = lsquic_stream_conn(stream);
+    tut = (void *) lsquic_conn_get_ctx(conn);
+
+    nread = lsquic_stream_readf(stream, tut_client_readf_v1, NULL);
+    if (nread == 0)
+    {
+        LOG("read to end-of-stream: close and read from stdin again");
+        lsquic_stream_shutdown(stream, 0);
+        ev_io_start(tut->tut_loop, &tut->tut_u.c.stdin_w);
+    }
+    else if (nread < 0)
+    {
+        LOG("error reading from stream (%s) -- exit loop");
+        ev_break(tut->tut_loop, EVBREAK_ONE);
+    }
+}
+
+
+struct client_read_v2_ctx {
+    struct tut      *tut;
+    lsquic_stream_t *stream;
+};
+
+
+static size_t
+tut_client_readf_v2 (void *ctx, const unsigned char *data, size_t len, int fin)
+{
+    struct client_read_v2_ctx *v2ctx = ctx;
+    if (len)
+        fwrite(data, 1, len, stdout);
+    if (fin)
+    {
+        fflush(stdout);
+        LOG("read to end-of-stream: close and read from stdin again");
+        lsquic_stream_shutdown(v2ctx->stream, 0);
+        ev_io_start(v2ctx->tut->tut_loop, &v2ctx->tut->tut_u.c.stdin_w);
+    }
+    return len;
+}
+
+
+/* A bit different from v1: act on fin.  This version saves an extra on_read()
+ * call at the cost of some complexity.
+ */
+static void
+tut_client_on_read_v2 (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
+{
+    lsquic_conn_t *conn;
+    struct tut *tut;
+    ssize_t nread;
+
+    conn = lsquic_stream_conn(stream);
+    tut = (void *) lsquic_conn_get_ctx(conn);
+
+    struct client_read_v2_ctx v2ctx = { tut, stream, };
+    nread = lsquic_stream_readf(stream, tut_client_readf_v2, &v2ctx);
+    if (nread < 0)
     {
         LOG("error reading from stream (%s) -- exit loop");
         ev_break(tut->tut_loop, EVBREAK_ONE);
@@ -334,13 +419,22 @@ tut_client_on_close (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 }
 
 
-static const struct lsquic_stream_if tut_client_callbacks =
+static void (*const tut_client_on_read[])
+                        (lsquic_stream_t *, lsquic_stream_ctx_t *h) =
+{
+    tut_client_on_read_v0,
+    tut_client_on_read_v1,
+    tut_client_on_read_v2,
+};
+
+
+static struct lsquic_stream_if tut_client_callbacks =
 {
     .on_new_conn        = tut_client_on_new_conn,
     .on_hsk_done        = tut_client_on_hsk_done,
     .on_conn_closed     = tut_client_on_conn_closed,
     .on_new_stream      = tut_client_on_new_stream,
-    .on_read            = tut_client_on_read,
+    .on_read            = tut_client_on_read_v0,
     .on_write           = tut_client_on_write,
     .on_close           = tut_client_on_close,
 };
@@ -636,10 +730,13 @@ main (int argc, char **argv)
 
     memset(&tut, 0, sizeof(tut));
 
-    while (opt = getopt(argc, argv, "c:f:k:l:L:hv"), opt != -1)
+    while (opt = getopt(argc, argv, "b:c:f:k:l:L:hv"), opt != -1)
     {
         switch (opt)
         {
+        case 'b':
+            tut_client_callbacks.on_read = tut_client_on_read[ atoi(optarg) ];
+            break;
         case 'c':
             cert_file = optarg;
             break;
