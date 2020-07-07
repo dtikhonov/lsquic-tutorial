@@ -452,6 +452,7 @@ tut_server_on_conn_closed (lsquic_conn_t *conn)
 struct tut_server_stream_ctx
 {
     size_t           tssc_sz;            /* Number of bytes in tsc_buf */
+    off_t            tssc_off;           /* Number of bytes written to stream */
     unsigned char    tssc_buf[0x100];    /* Bytes read in from client */
 };
 
@@ -473,6 +474,7 @@ tut_server_on_new_stream (void *stream_if_ctx, struct lsquic_stream *stream)
     }
 
     tssc->tssc_sz = 0;
+    tssc->tssc_off = 0;
     lsquic_stream_wantread(stream, 1);
     LOG("created new echo stream -- want to read");
     return (void *) tssc;
@@ -517,28 +519,26 @@ tut_server_on_read (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 
 
 static void
-tut_server_on_write (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
+tut_server_on_write_v0 (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 {
     struct tut_server_stream_ctx *const tssc = (void *) h;
     ssize_t nw;
 
     assert(tssc->tssc_sz > 0);
-    nw = lsquic_stream_write(stream, tssc->tssc_buf, tssc->tssc_sz);
+    nw = lsquic_stream_write(stream, tssc->tssc_buf + tssc->tssc_off,
+                                            tssc->tssc_sz - tssc->tssc_off);
     if (nw > 0)
     {
-        tssc->tssc_sz -= (size_t) nw;
-        if (tssc->tssc_sz == 0)
+        tssc->tssc_off += nw;
+        if (tssc->tssc_off == tssc->tssc_sz)
         {
             LOG("wrote all %zd bytes to stream, close stream",
                                                             (size_t) nw);
             lsquic_stream_close(stream);
         }
         else
-        {
-            memmove(tssc->tssc_buf, tssc->tssc_buf + nw, tssc->tssc_sz);
             LOG("wrote %zd bytes to stream, still have %zd bytes to write",
-                                                (size_t) nw, tssc->tssc_sz);
-        }
+                                (size_t) nw, tssc->tssc_sz - tssc->tssc_off);
     }
     else
     {
@@ -561,13 +561,20 @@ tut_server_on_close (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 }
 
 
+static void (*const tut_server_on_write[])(lsquic_stream_t *,
+                                                lsquic_stream_ctx_t *) =
+{
+    tut_server_on_write_v0,
+};
+
+
 static const struct lsquic_stream_if tut_server_callbacks =
 {
     .on_new_conn        = tut_server_on_new_conn,
     .on_conn_closed     = tut_server_on_conn_closed,
     .on_new_stream      = tut_server_on_new_stream,
     .on_read            = tut_server_on_read,
-    .on_write           = tut_server_on_write,
+    .on_write           = tut_server_on_write_v0,
     .on_close           = tut_server_on_close,
 };
 
