@@ -246,10 +246,11 @@ tut_client_on_conn_closed (struct lsquic_conn *conn)
 static lsquic_stream_ctx_t *
 tut_client_on_new_stream (void *stream_if_ctx, struct lsquic_stream *stream)
 {
+    struct tut *tut = stream_if_ctx;
     LOG("created new stream, we want to write");
     lsquic_stream_wantwrite(stream, 1);
-    /* OK to return NULL: we don't have any stream-specific context */
-    return NULL;
+    /* return tut: we don't have any stream-specific context */
+    return (void *) tut;
 }
 
 
@@ -257,13 +258,9 @@ tut_client_on_new_stream (void *stream_if_ctx, struct lsquic_stream *stream)
 static void
 tut_client_on_read_v0 (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 {
-    lsquic_conn_t *conn;
-    struct tut *tut;
+    struct tut *tut = (struct tut *) h;
     ssize_t nread;
     unsigned char buf[3];
-
-    conn = lsquic_stream_conn(stream);
-    tut = (void *) lsquic_conn_get_ctx(conn);
 
     nread = lsquic_stream_read(stream, buf, sizeof(buf));
     if (nread > 0)
@@ -301,12 +298,8 @@ tut_client_readf_v1 (void *ctx, const unsigned char *data, size_t len, int fin)
 static void
 tut_client_on_read_v1 (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 {
-    lsquic_conn_t *conn;
-    struct tut *tut;
+    struct tut *tut = (struct tut *) h;
     ssize_t nread;
-
-    conn = lsquic_stream_conn(stream);
-    tut = (void *) lsquic_conn_get_ctx(conn);
 
     nread = lsquic_stream_readf(stream, tut_client_readf_v1, NULL);
     if (nread == 0)
@@ -323,6 +316,9 @@ tut_client_on_read_v1 (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 }
 
 
+/* Alternatively, pass `stream' to lsquic_stream_readf() and call
+ * lsquic_stream_get_ctx() to get struct tut *
+ */
 struct client_read_v2_ctx {
     struct tut      *tut;
     lsquic_stream_t *stream;
@@ -352,12 +348,8 @@ tut_client_readf_v2 (void *ctx, const unsigned char *data, size_t len, int fin)
 static void
 tut_client_on_read_v2 (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 {
-    lsquic_conn_t *conn;
-    struct tut *tut;
+    struct tut *tut = (struct tut *) h;
     ssize_t nread;
-
-    conn = lsquic_stream_conn(stream);
-    tut = (void *) lsquic_conn_get_ctx(conn);
 
     struct client_read_v2_ctx v2ctx = { tut, stream, };
     nread = lsquic_stream_readf(stream, tut_client_readf_v2, &v2ctx);
