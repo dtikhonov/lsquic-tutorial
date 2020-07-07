@@ -174,6 +174,7 @@ tut_usage (const char *argv0)
 "                     these with comma, e.g. -l event=debug,conn=info.\n"
 "   -v              Verbose: log program messages as well.\n"
 "   -b VERSION      Use callbacks version VERSION.\n"
+"   -w VERSION      Use server write callback version VERSION.\n"
 "   -h              Print this help screen and exit.\n"
     , name);
 }
@@ -552,6 +553,53 @@ tut_server_on_write_v0 (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 }
 
 
+static size_t
+tssc_read (void *ctx, void *buf, size_t count)
+{
+    struct tut_server_stream_ctx *tssc = ctx;
+
+    if (count > tssc->tssc_sz - tssc->tssc_off)
+        count = tssc->tssc_sz - tssc->tssc_off;
+    memcpy(buf, tssc->tssc_buf + tssc->tssc_off, count);
+    tssc->tssc_off += count;
+    return count;
+}
+
+
+static size_t
+tssc_size (void *ctx)
+{
+    struct tut_server_stream_ctx *tssc = ctx;
+    return tssc->tssc_sz - tssc->tssc_off;
+}
+
+
+/* Same functionality as tut_server_on_write_v0(), but use the "reader"
+ * callbacks.  This is most useful when data comes from a different source
+ * such as file descriptor.
+ */
+static void
+tut_server_on_write_v1 (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
+{
+    struct tut_server_stream_ctx *const tssc = (void *) h;
+    struct lsquic_reader reader = { tssc_read, tssc_size, tssc, };
+    const size_t left = tssc->tssc_sz;
+    ssize_t nw;
+
+    nw = lsquic_stream_writef(stream, &reader);
+    if (nw > 0 && tssc->tssc_off == tssc->tssc_sz)
+    {
+        LOG("wrote all %zd bytes to stream, close stream", left);
+        lsquic_stream_close(stream);
+    }
+    else if (nw < 0)
+    {
+        LOG("stream_write() returned %ld, abort connection", (long) nw);
+        lsquic_conn_abort(lsquic_stream_conn(stream));
+    }
+}
+
+
 static void
 tut_server_on_close (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
 {
@@ -565,10 +613,11 @@ static void (*const tut_server_on_write[])(lsquic_stream_t *,
                                                 lsquic_stream_ctx_t *) =
 {
     tut_server_on_write_v0,
+    tut_server_on_write_v1,
 };
 
 
-static const struct lsquic_stream_if tut_server_callbacks =
+static struct lsquic_stream_if tut_server_callbacks =
 {
     .on_new_conn        = tut_server_on_new_conn,
     .on_conn_closed     = tut_server_on_conn_closed,
@@ -729,7 +778,7 @@ main (int argc, char **argv)
 
     memset(&tut, 0, sizeof(tut));
 
-    while (opt = getopt(argc, argv, "b:c:f:k:l:L:hv"), opt != -1)
+    while (opt = getopt(argc, argv, "w:b:c:f:k:l:L:hv"), opt != -1)
     {
         switch (opt)
         {
@@ -766,6 +815,9 @@ main (int argc, char **argv)
             break;
         case 'v':
             ++s_verbose;
+            break;
+        case 'w':
+            tut_server_callbacks.on_write = tut_server_on_write[ atoi(optarg) ];
             break;
         case 'h':
             tut_usage(argv[0]);
