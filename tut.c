@@ -833,9 +833,11 @@ int
 main (int argc, char **argv)
 {
     struct lsquic_engine_api eapi;
-    const char *cert_file = NULL, *key_file = NULL;
-    int opt, is_server;
+    const char *cert_file = NULL, *key_file = NULL, *eq, *val;
+    int opt, is_server, version_cleared = 0;
     socklen_t socklen;
+    struct lsquic_engine_settings settings;
+    int override_default_settings = 0;
     struct tut tut;
     union {
         struct sockaddr     sa;
@@ -843,6 +845,7 @@ main (int argc, char **argv)
         struct sockaddr_in6 addr6;
     } addr;
     const char *key_log_dir = NULL;
+    char errbuf[0x100];
 
     s_log_fh = stderr;
 
@@ -854,7 +857,7 @@ main (int argc, char **argv)
 
     memset(&tut, 0, sizeof(tut));
 
-    while (opt = getopt(argc, argv, "w:b:c:f:k:l:G:L:hv"), opt != -1)
+    while (opt = getopt(argc, argv, "w:b:c:f:k:l:o:G:L:hv"), opt != -1)
     {
         switch (opt)
         {
@@ -898,6 +901,50 @@ main (int argc, char **argv)
         case 'w':
             tut_server_callbacks.on_write = tut_server_on_write[ atoi(optarg) ];
             break;
+        case 'o':   /* For example: -o versions=h3-27 */
+            if (!override_default_settings)
+            {
+                lsquic_engine_init_settings(&settings,
+                                    cert_file || key_file ? LSENG_SERVER : 0);
+                override_default_settings = 1;
+            }
+            eq = strchr(optarg, '=');
+            if (!eq)
+            {
+                fprintf(stderr, "error processing -o: no equal sign\n");
+                exit(EXIT_FAILURE);
+            }
+            val = eq + 1;
+            if (0 == strncmp(optarg, "versions", eq - optarg))
+            {
+                if (!version_cleared)
+                {
+                    /* Clear all version on first -o version= */
+                    version_cleared = 1;
+                    settings.es_versions = 0;
+                }
+                enum lsquic_version ver = lsquic_str2ver(val, strlen(val));
+                if ((unsigned) ver < N_LSQVER)
+                {
+                    settings.es_versions |= 1 << ver;
+                    break;
+                }
+                ver = lsquic_alpn2ver(val, strlen(val));
+                if ((unsigned) ver < N_LSQVER)
+                {
+                    settings.es_versions |= 1 << ver;
+                    break;
+                }
+                fprintf(stderr, "error: unknown version `%s'\n", val);
+                exit(EXIT_FAILURE);
+            }
+            else
+            {
+                fprintf(stderr, "error: unknown option `%.*s'\n",
+                                                (int) (eq - optarg), optarg);
+                exit(EXIT_FAILURE);
+            }
+            break;
         case 'h':
             tut_usage(argv[0]);
             exit(EXIT_SUCCESS);
@@ -929,6 +976,16 @@ main (int argc, char **argv)
     else
     {
         LOG("`%s' is not a valid IP address", argv[optind]);
+        exit(EXIT_FAILURE);
+    }
+
+    /* Check settings if any -o flags were used: */
+    if (override_default_settings
+            && 0 != lsquic_engine_check_settings(&settings,
+                                    cert_file || key_file ? LSENG_SERVER : 0,
+                                    errbuf, sizeof(errbuf)))
+    {
+        LOG("invalid settings: %s", errbuf);
         exit(EXIT_FAILURE);
     }
 
@@ -1006,6 +1063,8 @@ main (int argc, char **argv)
         eapi.ea_keylog_if = &keylog_if;
         eapi.ea_keylog_ctx = (void *) key_log_dir;
     }
+    if (override_default_settings)
+        eapi.ea_settings = &settings;
 
     tut.tut_engine = lsquic_engine_new(tut.tut_flags & TUT_SERVER
                                             ? LSENG_SERVER : 0, &eapi);
