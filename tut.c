@@ -482,6 +482,23 @@ tut_server_on_new_stream (void *stream_if_ctx, struct lsquic_stream *stream)
 }
 
 
+static void
+reverse_string (unsigned char *p, size_t len)
+{
+    unsigned char *q, tmp;
+
+    q = p + len - 1;
+    while (p < q)
+    {
+        tmp = *p;
+        *p = *q;
+        *q = tmp;
+        ++p;
+        --q;
+    }
+}
+
+
 /* Read until newline and then echo it back */
 static void
 tut_server_on_read (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
@@ -499,6 +516,8 @@ tut_server_on_read (struct lsquic_stream *stream, lsquic_stream_ctx_t *h)
                             || tssc->tssc_sz == sizeof(tssc->tssc_buf))
         {
             LOG("read newline or filled buffer, switch to writing");
+            reverse_string(tssc->tssc_buf,
+                            tssc->tssc_sz - (buf[0] == (unsigned char) '\n'));
             lsquic_stream_wantread(stream, 0);
             lsquic_stream_wantwrite(stream, 1);
         }
