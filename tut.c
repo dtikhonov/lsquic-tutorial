@@ -833,7 +833,7 @@ int
 main (int argc, char **argv)
 {
     struct lsquic_engine_api eapi;
-    const char *cert_file = NULL, *key_file = NULL, *eq, *val;
+    const char *cert_file = NULL, *key_file = NULL, *val;
     int opt, is_server, version_cleared = 0;
     socklen_t socklen;
     struct lsquic_engine_settings settings;
@@ -908,14 +908,14 @@ main (int argc, char **argv)
                                     cert_file || key_file ? LSENG_SERVER : 0);
                 override_default_settings = 1;
             }
-            eq = strchr(optarg, '=');
-            if (!eq)
+            val = strchr(optarg, '=');
+            if (!val)
             {
                 fprintf(stderr, "error processing -o: no equal sign\n");
                 exit(EXIT_FAILURE);
             }
-            val = eq + 1;
-            if (0 == strncmp(optarg, "versions", eq - optarg))
+            ++val;
+            if (0 == strncmp(optarg, "version=", val - optarg))
             {
                 if (!version_cleared)
                 {
@@ -938,10 +938,13 @@ main (int argc, char **argv)
                 fprintf(stderr, "error: unknown version `%s'\n", val);
                 exit(EXIT_FAILURE);
             }
+            else if (0 == strncmp(optarg, "cc_algo=", val - optarg))
+                settings.es_cc_algo = atoi(val);
+            /* ...and so on: add more options here as necessary */
             else
             {
                 fprintf(stderr, "error: unknown option `%.*s'\n",
-                                                (int) (eq - optarg), optarg);
+                                        (int) (val - 1 - optarg), optarg);
                 exit(EXIT_FAILURE);
             }
             break;
