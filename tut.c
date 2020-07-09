@@ -754,6 +754,62 @@ tut_read_socket (EV_P_ ev_io *w, int revents)
 }
 
 
+static void *
+keylog_open (void *ctx, lsquic_conn_t *conn)
+{
+    const char *const dir = ctx ? ctx : ".";
+    const lsquic_cid_t *cid;
+    FILE *fh;
+    int sz;
+    unsigned i;
+    char id_str[MAX_CID_LEN * 2 + 1];
+    char path[PATH_MAX];
+    static const char b2c[16] = "0123456789ABCDEF";
+
+    cid = lsquic_conn_id(conn);
+    for (i = 0; i < cid->len; ++i)
+    {
+        id_str[i * 2 + 0] = b2c[ cid->idbuf[i] >> 4 ];
+        id_str[i * 2 + 1] = b2c[ cid->idbuf[i] & 0xF ];
+    }
+    id_str[i * 2] = '\0';
+    sz = snprintf(path, sizeof(path), "%s/%s.keys", dir, id_str);
+    if ((size_t) sz >= sizeof(path))
+    {
+        LOG("WARN: %s: file too long", __func__);
+        return NULL;
+    }
+    fh = fopen(path, "wb");
+    if (!fh)
+        LOG("WARN: could not open %s for writing: %s", path, strerror(errno));
+    return fh;
+}
+
+
+static void
+keylog_log_line (void *handle, const char *line)
+{
+    fputs(line, handle);
+    fputs("\n", handle);
+    fflush(handle);
+}
+
+
+static void
+keylog_close (void *handle)
+{
+    fclose(handle);
+}
+
+
+static const struct lsquic_keylog_if keylog_if =
+{
+    .kli_open       = keylog_open,
+    .kli_log_line   = keylog_log_line,
+    .kli_close      = keylog_close,
+};
+
+
 int
 main (int argc, char **argv)
 {
@@ -767,6 +823,7 @@ main (int argc, char **argv)
         struct sockaddr_in  addr4;
         struct sockaddr_in6 addr6;
     } addr;
+    const char *key_log_dir = NULL;
 
     s_log_fh = stderr;
 
@@ -778,7 +835,7 @@ main (int argc, char **argv)
 
     memset(&tut, 0, sizeof(tut));
 
-    while (opt = getopt(argc, argv, "w:b:c:f:k:l:L:hv"), opt != -1)
+    while (opt = getopt(argc, argv, "w:b:c:f:k:l:G:L:hv"), opt != -1)
     {
         switch (opt)
         {
@@ -805,6 +862,9 @@ main (int argc, char **argv)
                 fprintf(stderr, "error processing -l option\n");
                 exit(EXIT_FAILURE);
             }
+            break;
+        case 'G':
+            key_log_dir = optarg;
             break;
         case 'L':
             if (0 != lsquic_set_log_level(optarg))
@@ -922,6 +982,11 @@ main (int argc, char **argv)
                             ? &tut_server_callbacks : &tut_client_callbacks;
     eapi.ea_stream_if_ctx = &tut;
     eapi.ea_get_ssl_ctx   = tut_get_ssl_ctx;
+    if (key_log_dir)
+    {
+        eapi.ea_keylog_if = &keylog_if;
+        eapi.ea_keylog_ctx = (void *) key_log_dir;
+    }
 
     tut.tut_engine = lsquic_engine_new(tut.tut_flags & TUT_SERVER
                                             ? LSENG_SERVER : 0, &eapi);
