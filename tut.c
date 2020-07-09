@@ -175,6 +175,10 @@ tut_usage (const char *argv0)
 "   -v              Verbose: log program messages as well.\n"
 "   -b VERSION      Use callbacks version VERSION.\n"
 "   -w VERSION      Use server write callback version VERSION.\n"
+"   -o opt=val      Set lsquic engine setting to some value, overriding the\n"
+"                     defaults.  For example,\n"
+"                           -o version=ff00001c -o cc_algo=2\n"
+"   -G DIR          Log TLS secrets to a file in directory DIR.\n"
 "   -h              Print this help screen and exit.\n"
     , name);
 }
