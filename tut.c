@@ -901,7 +901,7 @@ main (int argc, char **argv)
         case 'w':
             tut_server_callbacks.on_write = tut_server_on_write[ atoi(optarg) ];
             break;
-        case 'o':   /* For example: -o versions=h3-27 */
+        case 'o':   /* For example: -o version=h3-27 */
             if (!override_default_settings)
             {
                 lsquic_engine_init_settings(&settings,
