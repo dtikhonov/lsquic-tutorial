@@ -162,7 +162,7 @@ tut_usage (const char *argv0)
         name = argv0;
 
     fprintf(stdout,
-"Usage: %s [options] IP port\n"
+"Usage: %s [-c cert -k key] [options] IP port\n"
 "\n"
 "   -c cert.file    Certificate.\n"
 "   -k key.file     Key file.\n"
@@ -838,10 +838,9 @@ main (int argc, char **argv)
 {
     struct lsquic_engine_api eapi;
     const char *cert_file = NULL, *key_file = NULL, *val;
-    int opt, is_server, version_cleared = 0;
+    int opt, is_server, version_cleared = 0, settings_initialized = 0;
     socklen_t socklen;
     struct lsquic_engine_settings settings;
-    int override_default_settings = 0;
     struct tut tut;
     union {
         struct sockaddr     sa;
@@ -869,6 +868,11 @@ main (int argc, char **argv)
             tut_client_callbacks.on_read = tut_client_on_read[ atoi(optarg) ];
             break;
         case 'c':
+            if (settings_initialized)
+            {
+                fprintf(stderr, "-c and -k should precede -o flags\n");
+                exit(EXIT_FAILURE);
+            }
             cert_file = optarg;
             break;
         case 'f':
@@ -880,6 +884,11 @@ main (int argc, char **argv)
             }
             break;
         case 'k':
+            if (settings_initialized)
+            {
+                fprintf(stderr, "-c and -k should precede -o flags\n");
+                exit(EXIT_FAILURE);
+            }
             key_file = optarg;
             break;
         case 'l':
@@ -906,11 +915,11 @@ main (int argc, char **argv)
             tut_server_callbacks.on_write = tut_server_on_write[ atoi(optarg) ];
             break;
         case 'o':   /* For example: -o version=h3-27 */
-            if (!override_default_settings)
+            if (!settings_initialized)
             {
                 lsquic_engine_init_settings(&settings,
                                     cert_file || key_file ? LSENG_SERVER : 0);
-                override_default_settings = 1;
+                settings_initialized = 1;
             }
             val = strchr(optarg, '=');
             if (!val)
@@ -986,16 +995,6 @@ main (int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    /* Check settings if any -o flags were used: */
-    if (override_default_settings
-            && 0 != lsquic_engine_check_settings(&settings,
-                                    cert_file || key_file ? LSENG_SERVER : 0,
-                                    errbuf, sizeof(errbuf)))
-    {
-        LOG("invalid settings: %s", errbuf);
-        exit(EXIT_FAILURE);
-    }
-
     /* Specifying certificate and key files indicates server mode */
     if (cert_file || key_file)
     {
@@ -1010,6 +1009,25 @@ main (int argc, char **argv)
             exit(EXIT_FAILURE);
         }
         tut.tut_flags |= TUT_SERVER;
+    }
+
+    if (!settings_initialized)
+        lsquic_engine_init_settings(&settings,
+                            tut.tut_flags & TUT_SERVER ? LSENG_SERVER : 0);
+
+    /* At the time of this writing, using the loss bits extension causes
+     * decryption failures in Wireshark.  For the purposes of the demo, we
+     * override the default.
+     */
+    settings.es_ql_bits = 0;
+
+    /* Check settings */
+    if (0 != lsquic_engine_check_settings(&settings,
+                            tut.tut_flags & TUT_SERVER ? LSENG_SERVER : 0,
+                            errbuf, sizeof(errbuf)))
+    {
+        LOG("invalid settings: %s", errbuf);
+        exit(EXIT_FAILURE);
     }
 
     /* Initialize event loop */
@@ -1070,8 +1088,7 @@ main (int argc, char **argv)
         eapi.ea_keylog_if = &keylog_if;
         eapi.ea_keylog_ctx = (void *) key_log_dir;
     }
-    if (override_default_settings)
-        eapi.ea_settings = &settings;
+    eapi.ea_settings = &settings;
 
     tut.tut_engine = lsquic_engine_new(tut.tut_flags & TUT_SERVER
                                             ? LSENG_SERVER : 0, &eapi);
