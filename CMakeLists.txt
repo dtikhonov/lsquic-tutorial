@@ -23,6 +23,7 @@ ADD_SUBDIRECTORY(lsquic/src/liblsquic)
 
 INCLUDE_DIRECTORIES(libev)
 ADD_EXECUTABLE(tut tut.c)
+ADD_EXECUTABLE(h3cli h3cli.c)
 SET(LIBS lsquic crypto ssl z m)
 IF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # If using older glibc, need to link with -lrt.  See clock_getres(2).
@@ -34,3 +35,4 @@ IF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     ENDIF()
 ENDIF()
 TARGET_LINK_LIBRARIES(tut ${LIBS})
+TARGET_LINK_LIBRARIES(h3cli ${LIBS})
