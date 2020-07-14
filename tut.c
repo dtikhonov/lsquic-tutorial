@@ -986,7 +986,7 @@ main (int argc, char **argv)
     else if (memset(&addr.addr6, 0, sizeof(addr.addr6)),
        inet_pton(AF_INET6, argv[optind], &addr.addr6.sin6_addr))
     {
-        addr.addr6.sin6_family = AF_INET;
+        addr.addr6.sin6_family = AF_INET6;
         addr.addr6.sin6_port   = htons(atoi(argv[optind + 1]));
     }
     else
