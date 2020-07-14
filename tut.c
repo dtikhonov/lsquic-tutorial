@@ -23,13 +23,39 @@
 #define EV_API_STATIC 1
 #include "ev.c"
 
-#include "lsquic.h"
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
-struct tut;
-static void tut_process_conns (struct tut *);
+#include "lsquic.h"
 
 
 static FILE *s_log_fh;
+
+
+struct tut
+{
+    /* Common elements needed by both client and server: */
+    enum {
+        TUT_SERVER  = 1 << 0,
+    }                           tut_flags;
+    int                         tut_sock_fd;    /* socket */
+    ev_io                       tut_sock_w;     /* socket watcher */
+    ev_timer                    tut_timer;
+    struct ev_loop             *tut_loop;
+    lsquic_engine_t            *tut_engine;
+    struct sockaddr_storage     tut_local_sas;
+    union
+    {
+        struct client
+        {
+            ev_io               stdin_w;    /* stdin watcher */
+            struct lsquic_conn *conn;
+            size_t              sz;         /* Size of bytes read is stored here */
+            char                buf[0x100]; /* Read up to this many bytes */
+        }   c;
+    }                   tut_u;
+};
+
+static void tut_process_conns (struct tut *);
 
 static int
 tut_log_buf (void *ctx, const char *buf, size_t len)
@@ -105,8 +131,94 @@ tut_get_ssl_ctx (void *peer_ctx)
 }
 
 
+enum ctl_what
+{
+    CW_SENDADDR = 1 << 0,
+    CW_ECN      = 1 << 1,
+};
+
+
+static void
+tut_setup_control_msg (struct msghdr *msg, enum ctl_what cw,
+        const struct lsquic_out_spec *spec, unsigned char *buf, size_t bufsz)
+{
+    struct cmsghdr *cmsg;
+    struct sockaddr_in *local_sa;
+    struct sockaddr_in6 *local_sa6;
+    struct in_pktinfo info;
+    struct in6_pktinfo info6;
+    size_t ctl_len;
+
+    msg->msg_control    = buf;
+    msg->msg_controllen = bufsz;
+
+    /* Need to zero the buffer due to a bug(?) in CMSG_NXTHDR.  See
+     * https://stackoverflow.com/questions/27601849/cmsg-nxthdr-returns-null-even-though-there-are-more-cmsghdr-objects
+     */
+    memset(buf, 0, bufsz);
+
+    ctl_len = 0;
+    for (cmsg = CMSG_FIRSTHDR(msg); cw && cmsg; cmsg = CMSG_NXTHDR(msg, cmsg))
+    {
+        if (cw & CW_SENDADDR)
+        {
+            if (AF_INET == spec->dest_sa->sa_family)
+            {
+                local_sa = (struct sockaddr_in *) spec->local_sa;
+                memset(&info, 0, sizeof(info));
+                info.ipi_spec_dst = local_sa->sin_addr;
+                cmsg->cmsg_level    = IPPROTO_IP;
+                cmsg->cmsg_type     = IP_PKTINFO;
+                cmsg->cmsg_len      = CMSG_LEN(sizeof(info));
+                ctl_len += CMSG_SPACE(sizeof(info));
+                memcpy(CMSG_DATA(cmsg), &info, sizeof(info));
+            }
+            else
+            {
+                local_sa6 = (struct sockaddr_in6 *) spec->local_sa;
+                memset(&info6, 0, sizeof(info6));
+                info6.ipi6_addr = local_sa6->sin6_addr;
+                cmsg->cmsg_level    = IPPROTO_IPV6;
+                cmsg->cmsg_type     = IPV6_PKTINFO;
+                cmsg->cmsg_len      = CMSG_LEN(sizeof(info6));
+                memcpy(CMSG_DATA(cmsg), &info6, sizeof(info6));
+                ctl_len += CMSG_SPACE(sizeof(info6));
+            }
+            cw &= ~CW_SENDADDR;
+        }
+        else if (cw & CW_ECN)
+        {
+            if (AF_INET == spec->dest_sa->sa_family)
+            {
+                const int tos = spec->ecn;
+                cmsg->cmsg_level = IPPROTO_IP;
+                cmsg->cmsg_type  = IP_TOS;
+                cmsg->cmsg_len   = CMSG_LEN(sizeof(tos));
+                memcpy(CMSG_DATA(cmsg), &tos, sizeof(tos));
+                ctl_len += CMSG_SPACE(sizeof(tos));
+            }
+            else
+            {
+                const int tos = spec->ecn;
+                cmsg->cmsg_level = IPPROTO_IPV6;
+                cmsg->cmsg_type  = IPV6_TCLASS;
+                cmsg->cmsg_len   = CMSG_LEN(sizeof(tos));
+                memcpy(CMSG_DATA(cmsg), &tos, sizeof(tos));
+                ctl_len += CMSG_SPACE(sizeof(tos));
+            }
+            cw &= ~CW_ECN;
+        }
+        else
+            assert(0);
+    }
+
+    msg->msg_controllen = ctl_len;
+}
+
+
+/* A simple version of ea_packets_out -- does not use ancillary messages */
 static int
-tut_packets_out (void *packets_out_ctx, const struct lsquic_out_spec *specs,
+tut_packets_out_v0 (void *packets_out_ctx, const struct lsquic_out_spec *specs,
                                                                 unsigned count)
 {
     unsigned n;
@@ -117,6 +229,9 @@ tut_packets_out (void *packets_out_ctx, const struct lsquic_out_spec *specs,
         return 0;
 
     n = 0;
+    msg.msg_flags      = 0;
+    msg.msg_control    = NULL;
+    msg.msg_controllen = 0;
     do
     {
         fd                 = (int) (uint64_t) specs[n].peer_ctx;
@@ -126,9 +241,6 @@ tut_packets_out (void *packets_out_ctx, const struct lsquic_out_spec *specs,
                                             sizeof(struct sockaddr_in6)),
         msg.msg_iov        = specs[n].iov;
         msg.msg_iovlen     = specs[n].iovlen;
-        msg.msg_flags      = 0;
-        msg.msg_control    = NULL;
-        msg.msg_controllen = 0;
         s = sendmsg(fd, &msg, 0);
         if (s < 0)
         {
@@ -150,6 +262,89 @@ tut_packets_out (void *packets_out_ctx, const struct lsquic_out_spec *specs,
         return -1;
     }
 }
+
+
+/* A more complicated version of ea_packets_out -- this one sets source IP
+ * address and ECN.
+ */
+static int
+tut_packets_out_v1 (void *packets_out_ctx, const struct lsquic_out_spec *specs,
+                                                                unsigned count)
+{
+    struct tut *const tut = packets_out_ctx;
+    unsigned n;
+    int fd, s = 0;
+    struct msghdr msg;
+    enum ctl_what cw;
+    union {
+        /* cmsg(3) recommends union for proper alignment */
+        unsigned char buf[
+            CMSG_SPACE(MAX(sizeof(struct in_pktinfo),
+                sizeof(struct in6_pktinfo))) + CMSG_SPACE(sizeof(int))
+        ];
+        struct cmsghdr cmsg;
+    } ancil;
+
+    if (0 == count)
+        return 0;
+
+    n = 0;
+    msg.msg_flags = 0;
+    do
+    {
+        fd                 = (int) (uint64_t) specs[n].peer_ctx;
+        msg.msg_name       = (void *) specs[n].dest_sa;
+        msg.msg_namelen    = (AF_INET == specs[n].dest_sa->sa_family ?
+                                            sizeof(struct sockaddr_in) :
+                                            sizeof(struct sockaddr_in6)),
+        msg.msg_iov        = specs[n].iov;
+        msg.msg_iovlen     = specs[n].iovlen;
+
+        /* Set up ancillary message */
+        if (tut->tut_flags & TUT_SERVER)
+            cw = CW_SENDADDR;
+        else
+            cw = 0;
+        if (specs[n].ecn)
+            cw |= CW_ECN;
+        if (cw)
+            tut_setup_control_msg(&msg, cw, &specs[n], ancil.buf,
+                                                    sizeof(ancil.buf));
+        else
+        {
+            msg.msg_control    = NULL;
+            msg.msg_controllen = 0;
+        }
+
+        s = sendmsg(fd, &msg, 0);
+        if (s < 0)
+        {
+            LOG("sendmsg failed: %s", strerror(errno));
+            break;
+        }
+        ++n;
+    }
+    while (n < count);
+
+    if (n < count)
+        LOG("could not send all of them");    /* TODO */
+
+    if (n > 0)
+        return n;
+    else
+    {
+        assert(s < 0);
+        return -1;
+    }
+}
+
+
+static int (*const tut_packets_out[]) (void *packets_out_ctx,
+                const struct lsquic_out_spec *specs, unsigned count) =
+{
+    tut_packets_out_v0,
+    tut_packets_out_v1,
+};
 
 
 static void
@@ -176,6 +371,7 @@ tut_usage (const char *argv0)
 "                     these with comma, e.g. -l event=debug,conn=info.\n"
 "   -v              Verbose: log program messages as well.\n"
 "   -b VERSION      Use callbacks version VERSION.\n"
+"   -p VERSION      Use packets_out version VERSION.\n"
 "   -w VERSION      Use server write callback version VERSION.\n"
 "   -o opt=val      Set lsquic engine setting to some value, overriding the\n"
 "                     defaults.  For example,\n"
@@ -184,31 +380,6 @@ tut_usage (const char *argv0)
 "   -h              Print this help screen and exit.\n"
     , name);
 }
-
-
-struct tut
-{
-    /* Common elements needed by both client and server: */
-    enum {
-        TUT_SERVER  = 1 << 0,
-    }                           tut_flags;
-    int                         tut_sock_fd;    /* socket */
-    ev_io                       tut_sock_w;     /* socket watcher */
-    ev_timer                    tut_timer;
-    struct ev_loop             *tut_loop;
-    lsquic_engine_t            *tut_engine;
-    struct sockaddr_storage     tut_local_sas;
-    union
-    {
-        struct client
-        {
-            ev_io               stdin_w;    /* stdin watcher */
-            struct lsquic_conn *conn;
-            size_t              sz;         /* Size of bytes read is stored here */
-            char                buf[0x100]; /* Read up to this many bytes */
-        }   c;
-    }                   tut_u;
-};
 
 
 static lsquic_conn_ctx_t *
@@ -707,9 +878,7 @@ tut_set_nonblocking (int fd)
 }
 
 
-/* Set up the socket to return original destination address in ancillary
- * messages.
- */
+/* Set up the socket to return original destination address in ancillary data */
 static int
 tut_set_origdst (int fd, const struct sockaddr *sa)
 {
@@ -815,8 +984,6 @@ tut_proc_ancillary (struct msghdr *msg, struct sockaddr_storage *storage,
 }
 
 
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
-
 #if defined(IP_RECVORIGDSTADDR)
 #   define DST_MSG_SZ sizeof(struct sockaddr_in)
 #else
@@ -825,7 +992,7 @@ tut_proc_ancillary (struct msghdr *msg, struct sockaddr_storage *storage,
 
 #define ECN_SZ CMSG_SPACE(sizeof(int))
 
-/* Amount of space required for incoming ancillary messages */
+/* Amount of space required for incoming ancillary data */
 #define CTL_SZ (CMSG_SPACE(MAX(DST_MSG_SZ, \
                                     sizeof(struct in6_pktinfo))) + ECN_SZ)
 
@@ -931,6 +1098,7 @@ main (int argc, char **argv)
     struct lsquic_engine_api eapi;
     const char *cert_file = NULL, *key_file = NULL, *val;
     int opt, is_server, version_cleared = 0, settings_initialized = 0;
+    int packets_out_version = 0;
     socklen_t socklen;
     struct lsquic_engine_settings settings;
     struct tut tut;
@@ -952,7 +1120,7 @@ main (int argc, char **argv)
 
     memset(&tut, 0, sizeof(tut));
 
-    while (opt = getopt(argc, argv, "w:b:c:f:k:l:o:G:L:hv"), opt != -1)
+    while (opt = getopt(argc, argv, "w:b:c:f:k:l:o:p:G:L:hv"), opt != -1)
     {
         switch (opt)
         {
@@ -989,6 +1157,9 @@ main (int argc, char **argv)
                 fprintf(stderr, "error processing -l option\n");
                 exit(EXIT_FAILURE);
             }
+            break;
+        case 'p':
+            packets_out_version = atoi(optarg);
             break;
         case 'G':
             key_log_dir = optarg;
@@ -1172,7 +1343,7 @@ main (int argc, char **argv)
 
     /* Initialize callbacks */
     memset(&eapi, 0, sizeof(eapi));
-    eapi.ea_packets_out = tut_packets_out;
+    eapi.ea_packets_out = tut_packets_out[packets_out_version];
     eapi.ea_packets_out_ctx = &tut;
     eapi.ea_stream_if   = tut.tut_flags & TUT_SERVER
                             ? &tut_server_callbacks : &tut_client_callbacks;
