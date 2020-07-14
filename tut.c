@@ -3,12 +3,14 @@
  * tut.c is the example program to illustrate lsquic API usage.
  */
 
+#define _GNU_SOURCE     /* For struct in6_pktinfo */
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -705,6 +707,33 @@ tut_set_nonblocking (int fd)
 }
 
 
+/* Set up the socket to return original destination address in ancillary
+ * messages.
+ */
+static int
+tut_set_origdst (int fd, const struct sockaddr *sa)
+{
+    int on, s;
+
+    on = 1;
+    if (AF_INET == sa->sa_family)
+        s = setsockopt(fd, IPPROTO_IP,
+#if defined(IP_RECVORIGDSTADDR)
+                                       IP_RECVORIGDSTADDR,
+#else
+                                       IP_PKTINFO,
+#endif
+                                                           &on, sizeof(on));
+    else
+        s = setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on, sizeof(on));
+
+    if (s != 0)
+        perror("setsockopt");
+
+    return s;
+}
+
+
 static void
 tut_timer_expired (EV_P_ ev_timer *timer, int revents)
 {
@@ -743,21 +772,82 @@ tut_process_conns (struct tut *tut)
 
 
 static void
+tut_proc_ancillary (struct msghdr *msg, struct sockaddr_storage *storage,
+                                                                    int *ecn)
+{
+    const struct in6_pktinfo *in6_pkt;
+    struct cmsghdr *cmsg;
+
+    for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg))
+    {
+        if (cmsg->cmsg_level == IPPROTO_IP &&
+            cmsg->cmsg_type  ==
+#if defined(IP_RECVORIGDSTADDR)
+                                IP_ORIGDSTADDR
+#else
+                                IP_PKTINFO
+#endif
+                                              )
+        {
+#if defined(IP_RECVORIGDSTADDR)
+            memcpy(storage, CMSG_DATA(cmsg), sizeof(struct sockaddr_in));
+#else
+            const struct in_pktinfo *in_pkt;
+            in_pkt = (void *) CMSG_DATA(cmsg);
+            ((struct sockaddr_in *) storage)->sin_addr = in_pkt->ipi_addr;
+#endif
+        }
+        else if (cmsg->cmsg_level == IPPROTO_IPV6 &&
+                 cmsg->cmsg_type  == IPV6_PKTINFO)
+        {
+            in6_pkt = (void *) CMSG_DATA(cmsg);
+            ((struct sockaddr_in6 *) storage)->sin6_addr =
+                                                    in6_pkt->ipi6_addr;
+        }
+        else if ((cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_TOS)
+                 || (cmsg->cmsg_level == IPPROTO_IPV6
+                                            && cmsg->cmsg_type == IPV6_TCLASS))
+        {
+            memcpy(ecn, CMSG_DATA(cmsg), sizeof(*ecn));
+            *ecn &= IPTOS_ECN_MASK;
+        }
+    }
+}
+
+
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+#if defined(IP_RECVORIGDSTADDR)
+#   define DST_MSG_SZ sizeof(struct sockaddr_in)
+#else
+#   define DST_MSG_SZ sizeof(struct in_pktinfo)
+#endif
+
+#define ECN_SZ CMSG_SPACE(sizeof(int))
+
+/* Amount of space required for incoming ancillary messages */
+#define CTL_SZ (CMSG_SPACE(MAX(DST_MSG_SZ, \
+                                    sizeof(struct in6_pktinfo))) + ECN_SZ)
+
+
+static void
 tut_read_socket (EV_P_ ev_io *w, int revents)
 {
     struct tut *const tut = w->data;
     ssize_t nread;
-    struct sockaddr_storage peer_sas;
+    int ecn;
+    struct sockaddr_storage peer_sas, local_sas;
     unsigned char buf[0x1000];
     struct iovec vec[1] = {{ buf, sizeof(buf) }};
+    unsigned char ctl_buf[CTL_SZ];
 
     struct msghdr msg = {
         .msg_name       = &peer_sas,
         .msg_namelen    = sizeof(peer_sas),
         .msg_iov        = vec,
         .msg_iovlen     = 1,
-        .msg_control    = NULL,
-        .msg_controllen = 0,
+        .msg_control    = ctl_buf,
+        .msg_controllen = sizeof(ctl_buf),
     };
     nread = recvmsg(w->fd, &msg, 0);
     if (-1 == nread) {
@@ -766,12 +856,14 @@ tut_read_socket (EV_P_ ev_io *w, int revents)
         return;
     }
 
+    local_sas = tut->tut_local_sas;
+    ecn = 0;
+    tut_proc_ancillary(&msg, &local_sas, &ecn);
+
     (void) lsquic_engine_packet_in(tut->tut_engine, buf, nread,
-        /* Very simple to begin with: use single local address */
-        (struct sockaddr *) &tut->tut_local_sas,
+        (struct sockaddr *) &local_sas,
         (struct sockaddr *) &peer_sas,
-        (void *) (uintptr_t) w->fd,
-        0 /* TODO: read ECN from ancillary data */);
+        (void *) (uintptr_t) w->fd, ecn);
 
     tut_process_conns(tut);
 }
@@ -1045,6 +1137,9 @@ main (int argc, char **argv)
         perror("fcntl");
         exit(EXIT_FAILURE);
     }
+    if (tut.tut_flags & TUT_SERVER)
+        if (0 != tut_set_origdst(tut.tut_sock_fd, &addr.sa))
+            exit(EXIT_FAILURE);
 
     if (tut.tut_flags & TUT_SERVER)
     {
