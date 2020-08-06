@@ -364,7 +364,7 @@ tut_usage (const char *argv0)
 "   -c cert.file    Certificate.\n"
 "   -k key.file     Key file.\n"
 "   -f log.file     Log message to this log file.  If not specified, the\n"
-"                     are printed to stderr.\n"
+"                     messages are printed to stderr.\n"
 "   -L level        Set library-wide log level.  Defaults to 'warn'.\n"
 "   -l module=level Set log level of specific module.  Several of these\n"
 "                     can be specified via multiple -l flags or by combining\n"
