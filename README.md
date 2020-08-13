@@ -70,7 +70,7 @@ The server can select one of three versions of "on stream read" callbacks.  Use 
 Both client and server can use the `-p` option to select one of two "send packets out" callbacks.
 
 ## HTTP/3 Client
-As a bonus, a simple HTTP/3 client is provided.  Example:
+As a bonus, a simple [HTTP/3](https://en.wikipedia.org/wiki/HTTP/3) client is provided.  Example:
 
 ```bash
 sh$ ./h3cli -M HEAD www.litespeedtech.com 443 /
