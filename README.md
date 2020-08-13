@@ -9,7 +9,7 @@ The client connects to the server and sends lines of text; the server reverses t
 
 The tutorial program was written as an educational aid.  Various aspects of the ways LSQUIC
 is used in it are considered in [Netdev 0x14 slides](https://github.com/dtikhonov/talks/blob/master/netdev-0x14/lsquic-slides.md).
-In addition to the slides, please refer to the [LSQUIC API Reference](hhttps://lsquic.readthedocs.io/en/latest/apiref.html).
+In addition to the slides, please refer to the [LSQUIC API Reference](https://lsquic.readthedocs.io/en/latest/apiref.html).
 
 tut.c contains several versions of reading and writing from stream to illustrate different ways of
 using the library.  There are also two ways to send packets.
