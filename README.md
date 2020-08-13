@@ -92,3 +92,10 @@ server: LiteSpeed
 ```
 
 Besides www.litespeedtech.com, other websites to try are www.facebook.com and www.google.com.
+
+## More Information
+Latest QUIC and HTTP/3 GitHub artefacts can be found [here](https://github.com/quicwg/base-drafts).
+The QUIC IETF Working Group materials are [here](https://datatracker.ietf.org/wg/quic/about/).
+
+The [LSQUIC GitHub Repo](https://github.com/litespeedtech/lsquic) contains several more advanced examples, among
+them HTTP/3 client and server programs.
