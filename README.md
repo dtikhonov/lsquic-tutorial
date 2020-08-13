@@ -63,6 +63,10 @@ The server can select one of two versions of "on stream write" callbacks.  Use `
 ### Running the client
 ```bash
 sh$ ./tut ::1 12345 -L debug -f client.log
+Hello!
+!olleH
+^D
+sh$
 ```
 
 The server can select one of three versions of "on stream read" callbacks.  Use `-b` command-line option for that.
