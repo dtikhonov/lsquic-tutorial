@@ -878,6 +878,24 @@ tut_set_nonblocking (int fd)
 }
 
 
+/* ToS is used to get ECN value */
+static int
+tut_set_ecn (int fd, const struct sockaddr *sa)
+{
+    int on, s;
+
+    on = 1;
+    if (AF_INET == sa->sa_family)
+        s = setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &on, sizeof(on));
+    else
+        s = setsockopt(fd, IPPROTO_IPV6, IPV6_RECVTCLASS, &on, sizeof(on));
+    if (s != 0)
+        perror("setsockopt(ecn)");
+
+    return s;
+}
+
+
 /* Set up the socket to return original destination address in ancillary data */
 static int
 tut_set_origdst (int fd, const struct sockaddr *sa)
@@ -1216,6 +1234,8 @@ main (int argc, char **argv)
             }
             else if (0 == strncmp(optarg, "cc_algo=", val - optarg))
                 settings.es_cc_algo = atoi(val);
+            else if (0 == strncmp(optarg, "ecn=", val - optarg))
+                settings.es_ecn = atoi(val);
             /* ...and so on: add more options here as necessary */
             else
             {
@@ -1308,6 +1328,8 @@ main (int argc, char **argv)
         perror("fcntl");
         exit(EXIT_FAILURE);
     }
+    if (0 != tut_set_ecn(tut.tut_sock_fd, &addr.sa))
+        exit(EXIT_FAILURE);
     if (tut.tut_flags & TUT_SERVER)
         if (0 != tut_set_origdst(tut.tut_sock_fd, &addr.sa))
             exit(EXIT_FAILURE);
